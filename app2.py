@@ -440,36 +440,130 @@ elif page == "Forecasting":
     if df_filtered.empty:
         st.info("No data available for the selected filters.")
     else:
-        df_forecast = df_filtered[["date", "usage"]].rename(columns={"date": "ds", "usage": "y"}).copy()
-        df_forecast = df_forecast.sort_values("ds")
+        # 1) Aggregate to monthly usage
+        df_monthly = df_filtered.copy()
+        df_monthly["month"] = df_monthly["date"].dt.to_period("M").dt.to_timestamp()
+        monthly_usage = df_monthly.groupby("month")["usage"].sum().reset_index()
 
-        if len(df_forecast) < 10:
-            st.warning("Not enough data points to generate a reliable forecast.")
+        # 2) Ensure continuous monthly range (fill missing months with 0)
+        full_range = pd.date_range(
+            start=monthly_usage["month"].min(),
+            end=monthly_usage["month"].max(),
+            freq="MS"
+        )
+        monthly_usage = (
+            monthly_usage
+            .set_index("month")
+            .reindex(full_range)
+            .fillna(0)
+            .rename_axis("ds")
+            .reset_index()
+        )
+        monthly_usage.rename(columns={"usage": "y"}, inplace=True)
+
+        if len(monthly_usage) < 6:
+            st.warning("Need at least 6 months of history to run a meaningful forecast.")
         else:
-            periods = st.slider("Forecast Horizon (Days)", min_value=30, max_value=365, value=90, step=30)
+            # 3) Forecast horizon
+            forecast_months = st.slider(
+                "Forecast months ahead",
+                min_value=3,
+                max_value=24,
+                value=12,
+                step=3
+            )
 
+            # 4) Prophet model on monthly usage
             model = Prophet()
-            model.fit(df_forecast)
-            future = model.make_future_dataframe(periods=periods)
+            model.fit(monthly_usage)
+            future = model.make_future_dataframe(periods=forecast_months, freq="MS")
             forecast = model.predict(future)
 
-            base_chart = alt.Chart(forecast).mark_line().encode(
-                x="ds:T",
-                y=alt.Y("yhat:Q", title="Forecasted Usage"),
-                color=alt.value(GRIDFORGE_COLORS["primary"])
+            # 5) Build chart dataframe (actual + forecast + CI)
+            chart_df = forecast[["ds", "yhat", "yhat_lower", "yhat_upper"]].merge(
+                monthly_usage, on="ds", how="left"
             )
 
-            ci_band = (
-                alt.Chart(forecast)
-                .mark_area(opacity=0.2)
-                .encode(
-                    x="ds:T",
-                    y="yhat_lower:Q",
-                    y2="yhat_upper:Q"
+            base = alt.Chart(chart_df).encode(x="ds:T")
+
+            band = base.mark_area(opacity=0.18, color=GRIDFORGE_COLORS["primary"]).encode(
+                y="yhat_lower:Q",
+                y2="yhat_upper:Q"
+            )
+
+            actual = base.mark_line(point=True, color=GRIDFORGE_COLORS["accent"]).encode(
+                y=alt.Y("y:Q", title="Monthly Usage"),
+                tooltip=["ds:T", "y:Q"]
+            )
+
+            forecast_line = base.mark_line(color=GRIDFORGE_COLORS["primary_dark"]).encode(
+                y="yhat:Q",
+                tooltip=["ds:T", "yhat:Q"]
+            )
+
+            # 6) Simple national-style benchmark by utility (usage per unit per month)
+            BENCHMARK_USAGE_PER_UNIT = {
+                "Electricity": 1200,   # kWh / unit / month (example)
+                "Gas": 300,           # therms / unit / month (example)
+                "Water": 25000,       # gallons / unit / month (example)
+            }
+
+            benchmark_chart = None
+            benchmark_value = None
+
+            if "units" in df_filtered.columns and selected_utility in BENCHMARK_USAGE_PER_UNIT:
+                units = df_filtered["units"].iloc[0]
+                benchmark_value = units * BENCHMARK_USAGE_PER_UNIT[selected_utility]
+
+                bench_df = forecast[["ds"]].copy()
+                bench_df["benchmark"] = benchmark_value
+
+                benchmark_chart = (
+                    alt.Chart(bench_df)
+                    .mark_line(strokeDash=[4, 4], color="#666666")
+                    .encode(
+                        x="ds:T",
+                        y="benchmark:Q",
+                        tooltip=["ds:T", "benchmark:Q"]
+                    )
                 )
-            )
 
-            st.altair_chart(ci_band + base_chart, use_container_width=True)
+            # 7) Render chart
+            if benchmark_chart is not None:
+                st.altair_chart(band + actual + forecast_line + benchmark_chart, use_container_width=True)
+                st.caption(
+                    "Orange = actual, Blue = forecast, shaded area = confidence interval, "
+                    "dashed grey = benchmark usage based on national-style assumptions."
+                )
+            else:
+                st.altair_chart(band + actual + forecast_line, use_container_width=True)
+                st.caption("Orange = actual, Blue = forecast, shaded area = confidence interval.")
+
+            # 8) Narrative summary vs benchmark
+            last_actual = monthly_usage.dropna(subset=["y"]).tail(1)
+            future_only = forecast[forecast["ds"] > monthly_usage["ds"].max()]
+
+            if not last_actual.empty and not future_only.empty:
+                last_actual_val = float(last_actual["y"].iloc[0])
+                next_3 = future_only.head(3)
+                avg_forecast_next_3 = float(next_3["yhat"].mean())
+
+                summary = f"""
+                **Forecast Summary for {selected_property} — {selected_utility}**
+
+                - Last actual month usage: **{last_actual_val:,.0f}**
+                - Average forecasted usage (next 3 months): **{avg_forecast_next_3:,.0f}**
+                """
+
+                if benchmark_value is not None:
+                    diff_pct = (avg_forecast_next_3 - benchmark_value) / benchmark_value * 100
+                    direction = "above" if diff_pct > 0 else "below"
+                    summary += f"""
+                    - Benchmark usage (national-style assumption): **{benchmark_value:,.0f}**
+                    - You are trending **{abs(diff_pct):.1f}% {direction}** the benchmark.
+                    """
+
+                st.markdown(summary)
 
 # ---------------------------------------------------------
 # PAGE: EXPORTS
@@ -505,4 +599,5 @@ elif page == "Exports":
             data=excel_data,
             file_name="gridforge_filtered_data.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
         )
