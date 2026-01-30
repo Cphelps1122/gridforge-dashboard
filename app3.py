@@ -4,6 +4,7 @@ import pandas as pd
 from utils.data_loader import load_data
 from utils.styles import inject_global_styles, enable_chart_theme
 
+
 # ---------------------------------------------------------
 # PAGE CONFIG
 # ---------------------------------------------------------
@@ -14,9 +15,9 @@ st.set_page_config(
     layout="wide",
 )
 
-# Inject global styles + chart theme
 inject_global_styles()
 enable_chart_theme()
+
 
 # ---------------------------------------------------------
 # LOAD DATA ONCE
@@ -27,6 +28,10 @@ def load_all_data():
     return load_data()
 
 df = load_all_data()
+
+# Store full dataset for Portfolio page
+st.session_state.df = df
+
 
 # ---------------------------------------------------------
 # SIDEBAR FILTERS (Shown on Every Page)
@@ -46,7 +51,7 @@ selected_utility = st.sidebar.selectbox("Utility", utilities)
 years = sorted(df["year"].dropna().unique())
 selected_years = st.sidebar.multiselect("Year(s)", years, default=years)
 
-# Comparison property (optional)
+# Comparison property
 comparison_property = st.sidebar.selectbox(
     "Comparison Property (optional)",
     ["None"] + properties,
@@ -55,6 +60,7 @@ comparison_property = st.sidebar.selectbox(
 
 # Normalize toggle
 normalize = st.sidebar.checkbox("Normalize by Occupancy", value=False)
+
 
 # ---------------------------------------------------------
 # FILTER DATA
@@ -73,6 +79,16 @@ if comparison_property != "None":
         & (df["utility"] == selected_utility)
         & (df["year"].isin(selected_years))
     ]
+
+
+# ---------------------------------------------------------
+# STORE FILTERED DATA IN SESSION STATE
+# ---------------------------------------------------------
+
+st.session_state.df_filtered = df_filtered
+st.session_state.df_comparison = df_comparison
+st.session_state.normalize = normalize
+
 
 # ---------------------------------------------------------
 # HOME PAGE (HERO SECTION)
@@ -117,6 +133,7 @@ st.markdown(
     unsafe_allow_html=True
 )
 
+
 # ---------------------------------------------------------
 # FEATURE HIGHLIGHTS
 # ---------------------------------------------------------
@@ -155,6 +172,7 @@ with col3:
         """,
         unsafe_allow_html=True
     )
+
 
 # ---------------------------------------------------------
 # CTA BUTTON
